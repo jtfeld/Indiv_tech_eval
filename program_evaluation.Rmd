@@ -1,0 +1,470 @@
+---
+title: "Neighbor2Neighbor Program Evlauation"
+author: "Joseph Feldblum"
+date: "2025-07-02"
+output: 
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(sjPlot)
+library(MuMIn)
+
+list.files("../")
+dat = readRDS("../n2n_test_data.rds") %>% 
+  as.data.frame() 
+
+dat = 
+  dat %>% 
+  rename(state = stae)
+```
+
+# Exploratory analysis
+
+Distribution of treatment and canvass_result in data
+
+```{r}
+table(dat$treatment, dat$canvass_result)
+```
+
+So the majority of treatment group are coded as "NOT_VISITED"
+
+Let's check the raw pct voting in each group
+
+```{r, echo = F}
+dat %>% 
+  mutate(treat_canv_res = paste(treatment, canvass_result, sep = "_")) %>% 
+  group_by(treat_canv_res) %>% 
+  summarize(n = n(),
+            pct_voting = mean(voted)) %>% 
+  as.data.frame()
+
+```
+
+ok, sanity check: same pct of "not visited" voted in treatment and control conditions
+
+## Effect of age
+
+Let's get a sense of voting rates by age: 
+```{r}
+dat %>% 
+  mutate(age = round(age)) %>% 
+  group_by(age) %>% 
+  summarize(n = n(),
+            pct_vote = mean(voted)) %>% 
+  ggplot(aes(x = age, y = pct_vote, size = n)) + 
+  geom_point() + 
+  scale_size_continuous()
+```
+
+
+16 and 17 year olds unsurprisingly have voting rates at or near 0.  Also we have some suspiciously old ages here, probably should truncate
+
+Let's look at the counts and voting rates of the youngest voters:
+
+```{r}
+dat %>% 
+  filter(age < 18) %>% 
+  group_by(round(age)) %>% 
+  summarize(n = n(),
+            pct_vote = mean(voted),
+            n_voted = sum(voted), 
+            n_treatment = sum(treatment),
+            n_treatment_voted = sum(treatment*voted)) %>% 
+  as.data.frame()
+
+```
+
+There are 4 total voters under 18 (presumably coding error or turned 18 between canvassing and election).  Simplest to just exclude kids under 18  
+
+And for the oldest ages:  
+
+```{r}
+dat %>% 
+  mutate(age = round(age)) %>% 
+  group_by(age) %>% 
+  summarize(n = n(),
+            pct_vote = mean(voted)) %>% 
+  as.data.frame() %>% 
+  tail(25)
+```
+
+We can explore different thresholds for exclusion, but I'll use 90 as the cutoff for now, since the number of individuals starts to drop below the distribution of the youngest voters around that age.  Having explored other ages for the maximum age of inclusion, results are robust to different cutoffs.
+
+What's up with NA aged individuals?
+
+```{r}
+dat %>% filter(is.na(age)) %>% count(treatment, canvass_result, voted)
+```
+
+These people seem to be voting at a lower rate than the overall sample, without more knowledge of the sample I'll exclude them too.
+
+Generally, though, it looks like we have a quadratic relationship between age and pct voted, which should be reflected in our model
+
+## Effect of race: 
+
+```{r}
+dat %>% 
+  group_by(race) %>% 
+  summarize(n = n(),
+            pct_vote = mean(voted))
+```
+
+Very very few native voters in sample unfortunately
+
+There are also some NAs, change coding to UNK so NA race individuals aren't dropped in analysis
+
+```{r}
+dat = 
+  dat %>% 
+  mutate(race = replace_na(race, "UNK"))
+```
+
+
+## Partisan score and turnout score
+
+Let's get a look at the distribution of the partisanship score and turnout score data:
+
+```{r}
+dat %>% 
+  ggplot(aes(x = partisan_score, y = turnout_score)) + 
+  geom_hex(bins = 100) + 
+  geom_vline(xintercept = 60)
+```
+
+So it looks like we have Very few individuals in the sample with a partisanship score below 60.  What's the distribution of canvassing results and voting behavior for them? 
+
+```{r}
+dat %>% 
+  filter(partisan_score < 60) %>% 
+  count(treatment, canvass_result) 
+```
+
+The vast majority of voters in the sample have a partisanship score of 60 or above, making it appear that a minimum score was used as a criterion for inclusion.  There are only 122 individuals in the sample with partisan scores below 60.  Therefore, to help with model convergence and interpretability, I'll exclude individuals with partisanship scores below 60.
+
+
+
+## Does volunteer enthusiasm matter?
+
+Because some volunteers asked for multiple assignments, I wondered if more enthusiastic volunteers might be more successful.  First, we'll look to see if there's an overall effect of the count of unique assignment ids (i.e. the number of assignments these volunteers took on) on voting rates:
+
+```{r}
+dat %>% 
+  group_by(canvasser_id) %>% 
+  mutate(n_assignment_ids = length(unique(assignment_id)),
+            n_voters = n()) %>% 
+  ungroup() %>% 
+  filter(canvass_result == "SPOKE_TO") %>% 
+  group_by(n_assignment_ids) %>% 
+  summarize(pct_vote = mean(voted),
+            n = n()) %>% 
+  ggplot(aes(x = n_assignment_ids, y = pct_vote)) + 
+  geom_point(aes(color = factor(n_assignment_ids == 1), size = n)) + scale_size_continuous() + 
+  geom_smooth()
+```
+
+Surprisingly, it seems that volunteers who took on more assignments were *less* effective!
+
+OK, but what about if we compare just those volunteers who completed one assignment to those who completed more than one? 
+
+```{r}
+dat %>% 
+  group_by(canvasser_id) %>% 
+  mutate(mult_assign_ids = length(unique(assignment_id)) > 1) %>% 
+  ungroup() %>% 
+  filter(canvass_result == "SPOKE_TO") %>% 
+  group_by(mult_assign_ids) %>% 
+  summarize(pct_vote = mean(voted),
+            n = n()) %>% 
+  ggplot(aes(x = factor(mult_assign_ids), y = pct_vote, size = n)) + 
+  geom_point()
+```
+
+Same surprising result!  So the most enthusiastic volunteers may not be the most effective
+
+## Household effects
+
+I wasn't sure if households were all coded as "spoken to" if someone in the house was, or if different people in a household could have different canvassing success codes.  Let's see:
+
+```{r}
+dat %>% 
+  group_by(household_id) %>% 
+  summarize(household_size = n(),
+         n_contacted = sum(canvass_result == "SPOKE_TO")) %>% 
+  ungroup() %>% 
+  filter(household_size > 1) %>% 
+  count(household_size, n_contacted)
+
+
+```
+
+So if anyone is contacted in the household, the whole household is considered "spoken_to". therefore, no need to add a term for "someone in household spoken to" for some that are coded otherwise
+
+# Analysis 1: Contacted vs. Control
+
+For this first analysis, I estimated the effect of voter contact relative to the control group (those with `treatment == 0`).  The Control group may differ from the Contacted group based on geography: rural voters (or voters in other areas) may be systematically more likely to not have enough neighbors to allow for control households to be set aside.
+
+## Analysis data creation
+
+```{r}
+adat = 
+  dat %>% 
+  mutate(z_age = scale(age), # scaling these terms to help with model convergence
+         z_turnout_score = scale(turnout_score),
+         z_partisan_score = scale(partisan_score)) %>% 
+  group_by(canvasser_id) %>% 
+  mutate(n_assignment_ids = length(unique(assignment_id))) %>% 
+  ungroup() %>% 
+  mutate(mult_assign_ids = n_assignment_ids > 1) %>% # to explore alternate specifications of volunteer enthusiasm measure
+  filter(age >= 18,
+         age <= 91, # also will silently drop NA ages
+         partisan_score > 60, # excluding small number of voters with low partisanship scores (only 5 were assigned to treatment)
+         !(treatment == 1 & canvass_result == "NOT_VISITED"), # excluding this group for now
+         canvass_result != "OPPOSITION_VOTER", # very few of these in sample
+         !(treatment == 1 & canvass_result == "NOT_HOME")) %>%  # excluding for now, worth comparing 
+  mutate(canvass_result2 = factor(canvass_result),
+         race2 = factor(race),
+         urbanicity2 = factor(urbanicity))
+
+# ensure no NAs:
+sapply(adat, function(x) sum(is.na(x)))
+```
+
+Check for differences in distributions of predictors in two groups: 
+
+```{r}
+adat %>% ggplot(aes(x = factor(canvass_result), y = turnout_score)) + geom_violin(draw_quantiles = 0.5)
+
+adat %>% ggplot(aes(x = factor(canvass_result), y = log(101 - partisan_score))) + geom_violin(draw_quantiles = 0.5)
+```
+
+Both turnout score and partisan scores look consistent
+
+## Model results
+
+For full modeling procedure, including testing whether model expectations are met, please see the `analysis.R` file.  I'm just showing the results here:
+
+```{r, echo=FALSE}
+load(file = "mod_res.RData")
+```
+
+### 1. Model fit with and without canvass result term
+
+First, let's compare model fit of `m2`, the model that includes the `canvass_result` term, and `m3`, the same model without that term.  The model with the lower AICc score (corrected Akaike's Information Criterion) has better support.  
+
+```{r}
+AICc(m2, m3)
+```
+
+### 2. Model results table
+
+Here are the results of the best-supported model for predicting likelihood of voting: 
+
+```{r}
+tab_model(m2)
+```
+
+So we can see that, all else equal, a voter who was spoken to by a canvasser was 17% increase in odds of voting relative to  someone who was in the control group.  
+
+### 3. Model-predicted voting rates
+
+Finally, we can get a measure of predicted probability of voting in these two groups:
+
+```{r}
+plot_model(m2, type = "pred", terms = "canvass_result2")
+
+```
+
+Overall, we're seeing about a 2.5 percentage point increase in voting for voters that were successfully contacted vs those that were in the control group.
+
+A few more results of interest: First, the association between (z-transformed) age on predicted probability of voting: 
+
+```{r}
+plot_model(m2, type = "pred", terms = "z_age [all]")
+```
+
+And, surprisingly, the *negative* association between total assignments a volunteer took on and their contacts' probability of voting: 
+
+```{r}
+plot_model(m2, type = "pred", terms = "n_assignment_ids [all]")
+```
+
+Finally, we can see the predicted probabilities of voting by race.  Note that `race == "UNK"` voters are here predicted to vote at the *highest* rate.  This discrepancy between model predictions and raw data is addressed in the `analysis.R` file.
+
+```{r}
+plot_model(m2, type = "pred", terms = "race2")
+```
+
+
+## Interpretation
+
+Overall, we're seeing about a 2.5 percentage point increase in probability of voting for voters that were successfully contacted vs those that were in the control group.  In addition, we're doing a considerably better job predicting voting behavior if we include canvassing results in our model than we would do if we excluded that term.  
+
+
+
+# Analysis 2: Contacted vs. Control
+
+For this second analysis, I estimated the effect of voter contact relative to the *treatment but not visited* group (those with `treatment == 1` & `canvass_result == “NOT_VISITED”`).  The treatment but not visited group may be expected to differ less from the Contacted group geographically than comparison 1 above, but these groups could still differ systematically for all kinds of reasons (e.g. something like apparent household wealth influencing both likelihood of a canvasser approaching the house and the residents’ likelihood of voting) 
+
+## Analysis data creation
+
+```{r}
+adat2 = 
+  dat %>% 
+  mutate(z_age = scale(age),
+         z_turnout_score = scale(turnout_score),
+         z_partisan_score = scale(partisan_score)) %>% 
+  group_by(canvasser_id) %>% 
+  mutate(n_assignment_ids = length(unique(assignment_id))) %>% 
+  ungroup() %>% 
+  mutate(mult_assign_ids = n_assignment_ids > 1) %>% 
+  filter(age >= 18,
+         partisan_score > 60, # excluding small number of voters with low partisanship scores (only 5 were assigned to treatment)
+         !(treatment == 0 & canvass_result == "NOT_VISITED"), # excluding this group for now
+         canvass_result != "OPPOSITION_VOTER", # very few of these in sample
+         !(treatment == 1 & canvass_result == "NOT_HOME")) %>%  # excluding for now, worth comparing 
+  mutate(canvass_result2 = factor(canvass_result),
+         race2 = factor(race),
+         urbanicity2 = factor(urbanicity))
+
+```
+
+As before, both turnout score and partisan scores look consistent between comparison groups
+
+## Model results
+
+For full modeling procedure, including testing whether model expectations are met, please see the `analysis.R` file.  I'm just showing the results here:
+
+### 1. Model fit with and without canvass result term
+
+First, let's compare model fit of `mm2`, the model that includes the `canvass_result` term, and `mm3`, the same model without that term.  The model with the lower AICc score (corrected Akaike's Information Criterion) has better support.  
+
+```{r}
+AICc(mm2, mm3)
+```
+
+So again, the model that includes the `canvass_result` term fits considerably better than the one without.
+
+### 2. Model results table
+
+Here are the results of the best-supported model for predicting likelihood of voting: 
+
+```{r}
+tab_model(mm2)
+```
+
+So we can see that, all else equal, a voter who was spoken to by a canvasser was 18% increase in odds of voting relative to someone who was in the treatment group but not contacted. 
+
+### 3. Model-predicted voting rates
+
+Finally, we can get a measure of predicted probability of voting in these two groups:
+
+```{r}
+plot_model(mm2, type = "pred", terms = "canvass_result2")
+
+```
+
+Overall, we're seeing a nearly identical ~2.5 percentage point increase in probability of voting for voters that were successfully contacted vs those that were in the treatment group but not contacted.
+
+Other results are remarkably consistent between analyses.
+
+## Interpretation
+
+Overall, we're again seeing about a 2.5 percentage point increase in probability of voting for voters that were successfully contacted vs those that were in the treatment group but not contacted.  In addition, we're again doing a considerably better job predicting voting behavior if we include canvassing results in our model than we would do if we excluded that term.  
+
+
+# Analysis 3: Contacted vs. Not Home
+
+For this third analysis, I estimated the effect of voter contact relative to the *attempted but not home* group (those with `treatment == 1` & `canvass_result == “NOT_HOME”`). Because canvassers attempted to approach the houses represented in both of these groups, they may be expected to differ less geographically and in terms of external characteristics.  However, these groups could differ systematically for other reasons (e.g. residents’ willingness to come to the door to talk to a stranger, work-from-home status, etc). 
+
+## Analysis data creation
+
+```{r}
+adat3 = 
+  dat %>% 
+  mutate(z_age = scale(age),
+         z_turnout_score = scale(turnout_score),
+         z_partisan_score = scale(partisan_score)) %>% 
+  group_by(canvasser_id) %>% 
+  mutate(n_assignment_ids = length(unique(assignment_id))) %>% 
+  ungroup() %>% 
+  mutate(mult_assign_ids = n_assignment_ids > 1) %>% 
+  filter(age >= 18,
+         partisan_score > 60, # excluding small number of voters with low partisanship scores (only 5 were assigned to treatment)
+         canvass_result != "NOT_VISITED", # excluding this group for now
+         canvass_result != "OPPOSITION_VOTER" # very few of these in sample
+         ) %>%  # excluding for now, worth comparing 
+  mutate(canvass_result2 = factor(canvass_result),
+         race2 = factor(race),
+         urbanicity2 = factor(urbanicity))
+
+```
+
+As before, both turnout score and partisan scores look consistent between comparison groups
+
+## Model results
+
+For full modeling procedure, including testing whether model expectations are met, please see the `analysis.R` file.  I'm just showing the results here:
+
+### 1. Model fit with and without canvass result term
+
+First, let's compare model fit of `mmm2`, the model that includes the `canvass_result` term, and `mmm3`, the same model without that term.  The model with the lower AICc score (corrected Akaike's Information Criterion) has better support.  
+
+```{r}
+AICc(mmm2, mmm3)
+```
+
+So again, the model that includes the `canvass_result` term fits considerably better than the one without.
+
+### 2. Model results table
+
+Here are the results of the best-supported model for predicting likelihood of voting: 
+
+```{r}
+tab_model(mmm2)
+```
+
+Here we see that, all else equal, a voter who was spoken to by a canvasser was 21% increase in odds of voting relative to someone whose house was approached but they weren't home. 
+
+### 3. Model-predicted voting rates
+
+Finally, we can get a measure of predicted probability of voting in these two groups:
+
+```{r}
+plot_model(mmm2, type = "pred", terms = "canvass_result2")
+
+```
+
+Overall, we're seeing a slightly higher ~3 percentage point increase in probability of voting for voters that were successfully contacted vs those that were in the treatment group but not contacted.
+
+Other results are remain consistent.
+
+## Interpretation
+
+Overall, we're again seeing about a 3 percentage point increase in probability of voting for voters that were successfully contacted vs those that were in the treatment group but not contacted.  In addition, we're again doing a considerably better job predicting voting behavior if we include canvassing results in our model than we would do if we excluded that term.  
+
+# Overall summary
+
+Despite the potential biases in the sample, results remain remarkably consistent across our three comparisons.  Voters with whom a volunteer spoke had between a 2.5 and 3 percentage point increase in ther probability of voting relative to those in the control group, those who were assigned to the treatment group but never contacted, and those whose houses were approached but were not home.  The concordance between these analyses suggests that this effect is robust to model specification and sources of sampling bias. 
+
+Not assessed here was the overall effect of the program as implemented to date.  With more time, I'd like to also estimate the effect of the program on voting behavior.
+
+But based on this analysis, it appears that voter contact through the Neighbor2Neighbor program has consistently positive effecs on voter turnout.  
+
+# Recommendations
+
+- Given that 1) speaking to voters appears to have a consistent positive association with voting rates, but 2) the majority of households in the “treatment” group were coded as not contacted, focus should be given to how to optimize contact success rates for canvassers.
+- Scaling may be complicated; I was surprised that the volunteers with the most assignments had lower rates of voter turnout.  If this effect is to be believed, maybe efforts could focus more on activating first-time canvassers than on encouraging repeat canvassing assignments (although the latter should not be discouraged).
+- A follow-up analysis with additional data could be helpful for further optimizing the program: for example, what are the effects of time of day on likelihood of voter contact or (if voter contact is made) voting behavior?  Most people probably don’t want to canvas after 5 pm, but would that improve the likelihood of speaking to voters in the household?
+- What about the effect of race of the canvasser, or whether the canvasser and voter were the same race, on voter turnout?  
+
