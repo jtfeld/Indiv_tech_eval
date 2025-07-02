@@ -906,3 +906,6 @@ plot_model(mmm2, type = "pred", terms = "z_partisan_score [all]")
 plot_model(mmm2, type = "pred", terms = "urbanicity2")
 
 # effects largely identical to original contrast group
+
+
+save(m2, m3, mm2, mm3, mmm2, mmm3, file = "mod_res.RData")
